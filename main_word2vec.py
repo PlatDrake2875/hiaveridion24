@@ -4,35 +4,18 @@ import numpy as np
 import torch
 from transformers import AutoTokenizer, AutoModel
 import warnings
-
+import requests
+from time import sleep
+import random
+import sys
 warnings.filterwarnings("ignore")
 
-# --- Model Configuration ---
-# Use BERT-base-uncased as our embedding model
-model_name = "bert-base-uncased"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModel.from_pretrained(model_name)
-model.eval()  # set model to evaluation mode
+NUM_ROUNDS = 5
+host = "http://172.18.4.158:8000"
+post_url = f"{host}/submit-word"
+get_url = f"{host}/get-word"
+status_url = f"{host}/status"
 
-def get_embedding(text, max_length=32):
-    """
-    Compute an embedding for the given text using BERT by taking the [CLS] token's representation.
-    """
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding='max_length', max_length=max_length)
-    with torch.no_grad():
-        outputs = model(**inputs)
-    # Get the [CLS] token embedding (first token)
-    cls_embedding = outputs.last_hidden_state[:, 0, :]
-    # Return as numpy array
-    return cls_embedding.squeeze(0).cpu().numpy()
-
-def cosine_similarity(vec1, vec2):
-    """
-    Compute the cosine similarity between two vectors.
-    """
-    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-8)
-
-# --- Data: Player A's dictionary of words ---
 data_str = '''{
     "1": {"text": "Feather", "cost": 1},
     "2": {"text": "Coal", "cost": 1},
@@ -95,42 +78,63 @@ data_str = '''{
     "59": {"text": "Supermassive Black Hole", "cost": 35},
     "60": {"text": "Entropy", "cost": 45}
 }'''
-arsenal = json.loads(data_str)
+dict = json.loads(data_str)
 
-def rank_candidates(player_b_word, arsenal):
-    """
-    For a given Player B's word, constructs a target phrase (e.g., "defeats {player_b_word} Outcome"),
-    computes its BERT embedding, and then scores each candidate word from the arsenal using cosine similarity.
-    
-    Returns a sorted list of tuples (word_number, word_text, score).
-    """
+
+model_name = "bert-base-uncased"
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+model = AutoModel.from_pretrained(model_name)
+model.eval()
+
+def get_embedding(text, max_length=32):
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, padding='max_length', max_length=max_length)
+    with torch.no_grad():
+        outputs = model(**inputs)
+    cls_embedding = outputs.last_hidden_state[:, 0, :]
+    return cls_embedding.squeeze(0).cpu().numpy()
+
+def cosine_similarity(vec1, vec2):
+    return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2) + 1e-8)
+
+def rank_candidates(player_b_word, dict):
     target_phrase = f"{player_b_word} crushed"
     target_embedding = get_embedding(target_phrase)
     
     candidate_scores = []
-    for num, info in arsenal.items(): 
+    for num, info in dict.items(): 
         candidate_text = info["text"]
         candidate_embedding = get_embedding(candidate_text)
         score = cosine_similarity(candidate_embedding, target_embedding)
         candidate_scores.append((num, candidate_text, score))
-    
-    # Sort candidates in descending order (higher similarity score first)
+        
     candidate_scores.sort(key=lambda x: x[2], reverse=True)
     return candidate_scores
 
-# --- Main Loop: Run multiple tests until Ctrl+C is pressed ---
+
+def what_beats(word):
+    ranked_candidates = rank_candidates(word, dict)
+    best5 = ranked_candidates[:5]
+    best_candidate = min(best5, key=lambda x: int(x[0]))
+    return best_candidate[0]
+
+def play_game(player_id):
+    for round_id in range(1, NUM_ROUNDS+1):
+        round_num = -1
+        while round_num != round_id:
+            response = requests.get(get_url)
+            print(f"Get: {response.json()}")
+            sys_word = response.json()['word']
+            round_num = response.json()['round']
+            sleep(1)
+        if round_id > 1:
+            status = requests.get(status_url)
+            print(f"Round_status: {status.json()}")
+        chosen_word = what_beats(sys_word)
+        
+        data = {"player_id": player_id, "word_id": chosen_word, "round_id": round_id}
+        response = requests.post(post_url, json=data)
+        print(f"Post: {response.json()}")
+
 if __name__ == "__main__":
-    print("Enter Player B's word to test (press Ctrl+C to exit):")
-    try:
-        while True:
-            player_b_word = input("Player B's word: ").strip()
-            if not player_b_word:
-                continue
-            ranked_candidates = rank_candidates(player_b_word, arsenal)
-            
-            print("\nCandidate words ranked by likelihood to beat your word:")
-            for num, word, score in ranked_candidates[:5]:
-                print(f"{num}: {word} (score: {score:.4f})")
-            print("\n---\n")
-    except KeyboardInterrupt:
-        print("\nExiting. Goodbye!")
+    player_id = "5XTm2JDek9"
+    play_game(player_id)
